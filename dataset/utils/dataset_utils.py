@@ -8,7 +8,7 @@ from PIL import Image
 
 batch_size = 10
 train_ratio = 0.75 # merge original training set and test set, then split it manually. 
-alpha = 0.8
+alpha = 0.1
  # for Dirichlet distribution. 100 for exdir
 
 def check(config_path, train_path, test_path, num_clients, niid=False, 
@@ -512,14 +512,53 @@ def save_file(config_path, train_path, test_path, train_data, test_data, num_cli
     
     # Save task-specific data if applicable
     if client_task_data:
-        task_data_path = os.path.dirname(train_path) + "/task_data/"
-        if not os.path.exists(task_data_path):
-            os.makedirs(task_data_path)
+        # Create task_data directories for both train and test
+        train_task_data_path = os.path.dirname(train_path) + "/task_data/"
+        test_task_data_path = os.path.dirname(test_path) + "/task_data/"
+        os.makedirs(train_task_data_path, exist_ok=True)
+        os.makedirs(test_task_data_path, exist_ok=True)
+        
+        # Process each client's data
         for client_id, tasks_dict in enumerate(client_task_data):
             for task_id, data_dict in tasks_dict.items():
-                if data_dict['x'].size > 0: # Only save if client has data for this task
-                    with open(task_data_path + f'client_{client_id}_task_{task_id}.npz', 'wb') as f:
-                        np.savez_compressed(f, x=data_dict['x'], y=data_dict['y'])
+                if data_dict['x'].size > 0:  # Only save if client has data for this task
+                    # Split data into train and test sets
+                    x_data = data_dict['x']
+                    y_data = data_dict['y']
+                    
+                    # Check class distribution
+                    unique_labels, counts = np.unique(y_data, return_counts=True)
+                    min_samples = np.min(counts)
+                    
+                    if min_samples < 2:
+                        # If any class has less than 2 samples, use simple random split
+                        num_samples = len(y_data)
+                        num_train = int(0.75 * num_samples)  # Use same ratio as in split_data
+                        indices = np.random.permutation(num_samples)
+                        train_indices = indices[:num_train]
+                        test_indices = indices[num_train:]
+                        
+                        x_train = x_data[train_indices]
+                        x_test = x_data[test_indices]
+                        y_train = y_data[train_indices]
+                        y_test = y_data[test_indices]
+                    else:
+                        # Use stratified split if all classes have enough samples
+                        from sklearn.model_selection import train_test_split
+                        x_train, x_test, y_train, y_test = train_test_split(
+                            x_data, y_data, 
+                            train_size=0.75,  # Use same ratio as in split_data
+                            stratify=y_data,  # Maintain class distribution
+                            random_state=42    # For reproducibility
+                        )
+                    
+                    # Save train data
+                    with open(os.path.join(train_task_data_path, f'client_{client_id}_task_{task_id}.npz'), 'wb') as f:
+                        np.savez_compressed(f, x=x_train, y=y_train)
+                    
+                    # Save test data
+                    with open(os.path.join(test_task_data_path, f'client_{client_id}_task_{task_id}.npz'), 'wb') as f:
+                        np.savez_compressed(f, x=x_test, y=y_test)
     
     with open(config_path, 'w') as f:
         ujson.dump(config, f)

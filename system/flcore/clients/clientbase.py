@@ -8,6 +8,7 @@ from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 # from utils.data_utils import read_client_data # Original import
 from utils.data_utils import read_client_data, read_client_task_data, read_config # Updated import
+import torch.nn.functional as F
 
 
 class Client(object):
@@ -46,7 +47,6 @@ class Client(object):
         # Stores DataLoaders for each task's train data for this client (for incremental learning)
         self.train_dataloaders_by_task = {}
 
-
         # check BatchNorm
         self.has_BatchNorm = False
         for layer in self.model.children():
@@ -59,14 +59,16 @@ class Client(object):
         self.train_time_cost = {'num_rounds': 0, 'total_cost': 0.0}
         self.send_time_cost = {'num_rounds': 0, 'total_cost': 0.0}
 
-        self.loss = nn.CrossEntropyLoss()
+        
+        # Use NLLLoss since we apply log_softmax in forward pass
+        self.loss = nn.NLLLoss()
         self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
         self.learning_rate_scheduler = torch.optim.lr_scheduler.ExponentialLR(
             optimizer=self.optimizer, 
             gamma=args.learning_rate_decay_gamma
         )
         self.learning_rate_decay = args.learning_rate_decay
-
+        
     # Modified to load data for a specific task
     def load_train_data(self, batch_size=None, current_task_id=0):
         """Load training data for the client, either task-specific or all data."""
@@ -164,8 +166,12 @@ class Client(object):
         
 
     def set_parameters(self, model):
+            
+        
+        # Update parameters
         for new_param, old_param in zip(model.parameters(), self.model.parameters()):
             old_param.data = new_param.data.clone()
+    
 
     def clone_model(self, model, target):
         for param, target_param in zip(model.parameters(), target.parameters()):
@@ -186,6 +192,7 @@ class Client(object):
         testloader = self.load_test_data(task_ids=task_ids)
         # --- FIX: Handle if testloader is None (no data for evaluation) ---
         if testloader is None or not testloader.dataset: 
+            print(f"DEBUG: Client {self.id} has no test data for task(s) {task_ids}")
             return 0, 0, 0.0 # acc, num, auc
 
         self.model.eval()
@@ -195,55 +202,56 @@ class Client(object):
         y_prob = []
         y_true = []
         
+        
         with torch.no_grad():
-            for x, y in testloader:
+            for batch_idx, (x, y) in enumerate(testloader):
                 if type(x) == type([]):
                     x[0] = x[0].to(self.device)
                 else:
                     x = x.to(self.device)
                 y = y.to(self.device)
+                
+                # Get model output
                 output = self.model(x)
+                # Add softmax for proper probability distribution
+                output = F.softmax(output, dim=1)
 
-                test_acc += (torch.sum(torch.argmax(output, dim=1) == y)).item()
+                # Get predictions and accuracy
+                predictions = torch.argmax(output, dim=1)
+                correct = (predictions == y).sum().item()
+                test_acc += correct
                 test_num += y.shape[0]
 
+                if batch_idx == 0:  # Print debug info for first batch only
+                    print(f"DEBUG: Client {self.id} - First test batch:")
+                    print(f"  Labels: {y.cpu().numpy()}")
+                    print(f"  Predictions: {predictions.cpu().numpy()}")
+                    print(f"  Correct predictions in batch: {correct}/{y.shape[0]}")
+
                 y_prob.append(output.detach().cpu().numpy())
-                
-                # Handling num_classes for AUC calculation when classes might be missing
-                # It's safer to use the actual classes present in the current batch
-                # or ensure the range covers all possible classes in the dataset.
-                # For classification, using all num_classes is usually fine if model outputs for all.
-                # The original `nc = self.num_classes; if self.num_classes == 2: nc += 1; ... lb = lb[:, :2]` 
-                # logic is a bit odd. `label_binarize` with `classes=np.arange(self.num_classes)`
-                # should handle multiclass correctly without the `nc += 1` hack.
-                # If only one class is present in y for a batch, AUC can still fail.
-                
-                lb = label_binarize(y.detach().cpu().numpy(), classes=np.arange(self.num_classes))
-                
-                y_true.append(lb)
+                y_true.append(label_binarize(y.detach().cpu().numpy(), classes=np.arange(self.num_classes)))
 
         y_prob = np.concatenate(y_prob, axis=0)
         y_true = np.concatenate(y_true, axis=0)
 
-        # Check for single-class predictions in y_true, which breaks AUC
-        # This check is crucial. If y_true.shape[1] is 0 or 1 for multi-class problem, AUC fails.
-        # It also fails if all values in y_true for a binary problem are the same.
+        # Calculate AUC only if we have valid multi-class data
         if y_true.shape[0] == 0 or y_true.shape[1] == 0: # No samples or no classes
              auc = 0.0
         elif y_true.shape[1] == 1: # Only one unique class in this entire aggregated test set
             auc = 0.0 # AUC is undefined for single class
-        elif np.all(y_true == 0) or np.all(y_true == 1): # All labels are the same (e.g. all 0s or all 1s in a binary classification)
+        elif np.all(y_true == 0) or np.all(y_true == 1): # All labels are the same
             auc = 0.0
         else:
             try:
-                # Ensure y_true has at least two classes to compute AUC.
-                # If it's a multi-class problem and current_batch_labels only has one class, AUC might throw error.
-                # `average='micro'` handles multi-class AUC by flattening.
                 auc = metrics.roc_auc_score(y_true, y_prob, average='micro')
             except ValueError:
-                # This can happen if y_true contains only one class after binarization,
-                # e.g., if a client's test set for a task only has one class, or if it's a binary problem but all samples are of one class.
                 auc = 0.0 
+
+        print(f"DEBUG: Client {self.id} Test results:")
+        print(f"  Total test samples: {test_num}")
+        print(f"  Total correct predictions: {test_acc}")
+        print(f"  Test Accuracy: {test_acc/test_num if test_num > 0 else 0:.4f}")
+        print(f"  Test AUC: {auc:.4f}")
 
         return test_acc, test_num, auc
 
@@ -268,6 +276,8 @@ class Client(object):
                     x = x.to(self.device)
                 y = y.to(self.device)
                 output = self.model(x)
+                # Add log_softmax for NLLLoss
+                output = F.log_softmax(output, dim=1)
                 loss = self.loss(output, y)
                 train_num += y.shape[0]
                 losses += loss.item() * y.shape[0]

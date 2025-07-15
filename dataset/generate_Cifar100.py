@@ -11,7 +11,9 @@ import argparse
 
 random.seed(2026)
 np.random.seed(1)
-num_clients = 3
+num_clients = 10  # Initial active clients
+reserve_clients = 5  # Additional clients that can join later
+total_clients = num_clients + reserve_clients  # Total number of clients to generate data for
 dir_path = "Cifar100/"
 
 
@@ -25,8 +27,11 @@ def generate_dataset(dir_path, num_clients, niid, balance, partition, task_type=
     train_path = dir_path + "train/"
     test_path = dir_path + "test/"
 
+    # Use total_clients instead of num_clients for data generation
+    total_clients_for_data = num_clients + reserve_clients
+
     # Check if dataset already generated, including task_type and classes_per_task
-    if check(config_path, train_path, test_path, num_clients, niid, balance, partition, task_type, classes_per_task):
+    if check(config_path, train_path, test_path, total_clients_for_data, niid, balance, partition, task_type, classes_per_task):
         return
         
     # Get Cifar100 data
@@ -60,24 +65,23 @@ def generate_dataset(dir_path, num_clients, niid, balance, partition, task_type=
     num_classes = len(set(dataset_label))
     print(f'Number of classes: {num_classes}')
 
-    # Call separate_data with new parameters and retrieve new return values
-    # Here, for Cifar100, assuming class_per_client=10 makes sense for I.2/I.3 non-IID
+    # Call separate_data with total_clients and new parameters
     X, y, statistic, client_task_data, num_tasks, task_classes_map = separate_data(
         (dataset_image, dataset_label), 
-        num_clients, 
+        total_clients_for_data,  # Use total_clients instead of num_clients
         num_classes, 
         niid, 
         balance, 
         partition, 
-        class_per_client=10, # For I.2/I.3, adjust as needed. For I.1, this is ignored.
+        class_per_client=10,
         task_type=task_type, 
-        classes_per_task=classes_per_task # For II.3
+        classes_per_task=classes_per_task
     )
     
     train_data, test_data = split_data(X, y)
     
-    # Save the new task-related information
-    save_file(config_path, train_path, test_path, train_data, test_data, num_clients, num_classes, 
+    # Save with total_clients
+    save_file(config_path, train_path, test_path, train_data, test_data, total_clients_for_data, num_classes, 
         statistic, niid, balance, partition, task_type, classes_per_task, num_tasks, task_classes_map, client_task_data)
 
 

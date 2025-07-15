@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 import torchvision
 import logging
+import torch.nn as nn # Added for ResNet18 model modification
 
 from flcore.servers.serveravg import FedAvg
 # from flcore.servers.serverpFedMe import pFedMe
@@ -88,8 +89,16 @@ def run(args):
                 args.model = DNN(60, 20, num_classes=args.num_classes).to(args.device)
         
         elif model_str == "ResNet18":
-            args.model = torchvision.models.resnet18(pretrained=False, num_classes=args.num_classes).to(args.device)
-        
+            print("\nInitializing ResNet18 model...")
+            # Initialize ResNet18 with the correct number of classes
+            model = torchvision.models.resnet18(pretrained=False)
+            # Modify the final fully connected layer for our number of classes
+            model.fc = nn.Linear(model.fc.in_features, args.num_classes)
+            args.model = model.to(args.device)
+            print("ResNet18 architecture:")
+            print(args.model)
+            print(f"Number of classes: {args.num_classes}")
+            
         elif model_str == "ResNet10":
             args.model = resnet10(num_classes=args.num_classes).to(args.device)
         
@@ -142,13 +151,8 @@ def run(args):
 
         print(args.model)
 
-        # select algorithm (This part remains largely unchanged, as it just instantiates the server)
-        # Assuming FedAvg is the only one active for now
         if args.algorithm == "FedAvg":
-            args.head = copy.deepcopy(args.model.fc)
-            args.model.fc = nn.Identity()
-            args.model = BaseHeadSplit(args.model, args.head)
-            server = FedAvg(args, i) # args now contains new task/dynamic client info
+            server = FedAvg(args, i)
 
         # (All other algorithms commented out as in original)
         # elif args.algorithm == "Local":
@@ -162,58 +166,38 @@ def run(args):
         server.Budget = [] # Reset budget for each run
         
         # Initial evaluation before any training
-        print(f"\n-------------Round number: 0 (Initial Evaluation)-------------")
+        print(f"\n-------------Round number: 0 (Initial Evaluation before training)-------------")
         server.evaluate(current_round_idx=0) # Pass round_idx
         server.current_task_id = 0 # Ensure task ID is reset for each new run
 
-        for round_idx in range(1, args.global_rounds + 1): # Start from round 1
+        # Training loop starts from round 0
+        for round_idx in range(args.global_rounds):
             s_t = time.time()
             
             # --- Task Progression Logic ---
-            # Advance to next task if current_round_idx reaches rounds_per_task for current task
-            if task_type == 'class_incremental' and round_idx > 0 and (round_idx - 1) % rounds_per_task == 0 and server.current_task_id < num_tasks:
-                # On the first round of a new task, load the previous global model for warm-up
-                # This depends on your continual learning strategy. For FedAvg, it just continues.
-                # For DKT, you might need to load a specific base model or apply distillation.
-                if round_idx > 1: # After first task
-                    server.current_task_id += 1
-                    print(f"\n============= Advancing to Task {server.current_task_id} (Round {round_idx}) ==============")
-                    # Optional: load previous task's saved global model if applicable for next task's training
-                    # e.g., if you want to use it for knowledge distillation or as a starting point.
-                    # server.load_model(task_id=server.current_task_id - 1) # Load previous task's model if saved
+            if task_type == 'class_incremental' and round_idx > 0 and round_idx % rounds_per_task == 0 and server.current_task_id < num_tasks:
+                server.current_task_id += 1
+                print(f"\n============= Advancing to Task {server.current_task_id} (Round {round_idx}) ==============")
 
-            # --- Client Dynamics (Join/Leave) Logic ---
-            if args.client_dynamic_mode == 'join_leave' and round_idx > 0 and round_idx % args.join_leave_round_interval == 0:
-                # Simplified dynamic client management for now
-                # This requires `server.all_clients` to be pre-populated with all potential client objects
-                # and `server.available_client_ids` to track who is currently eligible.
-                
-                # Placeholder for actual client dynamic management
-                # The `server.select_clients` method now handles the actual selection from `available_client_ids`
-                # after internal management of `available_client_ids` in `serverbase.py`.
-                
-                # Example: If clients leave, remove their IDs from server.available_client_ids
-                # If clients join, add new IDs to server.available_client_ids
-                # This setup implies a larger total client pool in `generate_dataset` for IDs beyond `args.num_clients`
-                # For demonstration, we just rely on `select_clients` to pick from the current `available_client_ids`.
-                pass # The logic for modifying `available_client_ids` needs to be placed *inside* server.select_clients or a dedicated server method.
-
-            server.selected_clients = server.select_clients(round_idx) # Pass round_idx for dynamic selection
+            # Select and train clients
+            server.selected_clients = server.select_clients(round_idx)
             server.send_models()
-
-            if round_idx % args.eval_gap == 0:
-                print(f"\n-------------Round number: {round_idx}-------------")
-                print("\nEvaluate global model")
-                server.evaluate(current_round_idx=round_idx) # Pass round_idx to evaluation
 
             # Local training on clients for the current task
             for client in server.selected_clients:
-                client.train(current_task_id=server.current_task_id) # Pass current task ID to client
+                client.train(current_task_id=server.current_task_id)
 
+            # Receive and aggregate models
             server.receive_models()
             if server.dlg_eval and round_idx % server.dlg_gap == 0:
-                server.call_dlg(round_idx) # DLG also needs current_task_id if it's task-specific
+                server.call_dlg(round_idx)
             server.aggregate_parameters()
+
+            # Evaluate after aggregation
+            if round_idx % args.eval_gap == 0:
+                print(f"\n-------------Round number: {round_idx}-------------")
+                print("\nEvaluate global model")
+                server.evaluate(current_round_idx=round_idx)
 
             server.Budget.append(time.time() - s_t)
             print('-'*25, 'time cost', '-'*25, server.Budget[-1])
@@ -261,6 +245,7 @@ if __name__ == "__main__":
                         choices=["cpu", "cuda"])
     parser.add_argument('-did', "--device_id", type=str, default="0")
     parser.add_argument('-data', "--dataset", type=str, default="MNIST")
+
     parser.add_argument('-ncl', "--num_classes", type=int, default=100, # 可以设置为100或一个更大的通用值
                     help="Total number of classes in the dataset (will be updated from dataset config)")
     parser.add_argument('-m', "--model", type=str, default="CNN")
@@ -280,8 +265,10 @@ if __name__ == "__main__":
                         help="Ratio of clients per round")
     parser.add_argument('-rjr', "--random_join_ratio", type=bool, default=False,
                         help="Random ratio of clients per round")
-    parser.add_argument('-nc', "--num_clients", type=int, default=20,
-                        help="Total number of clients (initial pool)") # Renamed for clarity
+    parser.add_argument('-nc', "--num_clients", type=int, default=10,
+                        help="Initial number of active clients")
+    parser.add_argument('-rc', "--reserve_clients", type=int, default=5,
+                        help="Number of reserve clients that can join during training")
     parser.add_argument('-pv', "--prev", type=int, default=0,
                         help="Previous Running times")
     parser.add_argument('-t', "--times", type=int, default=1,
@@ -374,9 +361,16 @@ if __name__ == "__main__":
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
 
+    # 添加GPU设备检查
     if args.device == "cuda" and not torch.cuda.is_available():
-        print("\ncuda is not avaiable.\n")
+        print("Warning: CUDA is not available, using CPU instead")
         args.device = "cpu"
+    else:
+        print(f"Using device: {args.device}")
+        if args.device == "cuda":
+            print(f"GPU Device Name: {torch.cuda.get_device_name(0)}")
+            # 设置CUDA设备
+            torch.cuda.set_device(int(args.device_id))
 
     print("=" * 50)
     for arg in vars(args):
