@@ -9,13 +9,28 @@ from utils.dataset_utils import check, separate_data, split_data, save_file
 from torchvision.datasets import ImageFolder, DatasetFolder
 from PIL import Image
 import argparse
+import requests
+import zipfile
+from tqdm import tqdm
 
-random.seed(1)
+random.seed(2026)
 np.random.seed(1)
-num_clients = 20
+num_clients = 10
 dir_path = "TinyImagenet/"
 
-# https://github.com/QinbinLi/MOON/blob/6c7a4ed1b1a8c0724fa2976292a667a828e3ff5d/datasets.py#L148
+def download_file(url, save_path):
+    """Download file from url with progress bar"""
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    block_size = 1024  # 1 KB
+    progress_bar = tqdm(total=total_size, unit='iB', unit_scale=True)
+    
+    with open(save_path, 'wb') as f:
+        for data in response.iter_content(block_size):
+            progress_bar.update(len(data))
+            f.write(data)
+    progress_bar.close()
+
 class ImageFolder_custom(DatasetFolder):
     def __init__(self, root, dataidxs=None, train=True, transform=None, target_transform=None):
         self.root = root
@@ -59,70 +74,120 @@ def generate_dataset(dir_path, num_clients, niid, balance, partition, task_type=
     config_path = dir_path + "config.json"
     train_path = dir_path + "train/"
     test_path = dir_path + "test/"
-
+    rawdata_path = dir_path + "rawdata/"
+    
     # Check if dataset already generated, including task_type and classes_per_task
     if check(config_path, train_path, test_path, num_clients, niid, balance, partition, task_type, classes_per_task):
         return
-
-    # Get data
-    if not os.path.exists(f'{dir_path}/rawdata/'):
-        print(f'Downloading Tiny-ImageNet to {dir_path}/rawdata/')
-        # Use subprocess.run for better control and error handling
-        import subprocess
+        
+    # Download Tiny-ImageNet if not exists
+    zip_file_path = os.path.join(rawdata_path, 'tiny-imagenet-200.zip')
+    if not os.path.exists(zip_file_path):
+        print("Downloading Tiny-ImageNet...")
+        os.makedirs(rawdata_path, exist_ok=True)
         try:
-            subprocess.run(['wget', '--directory-prefix', f'{dir_path}/rawdata/', 'http://cs231n.stanford.edu/tiny-imagenet-200.zip'], check=True)
-            subprocess.run(['unzip', f'{dir_path}/rawdata/tiny-imagenet-200.zip', '-d', f'{dir_path}/rawdata/'], check=True)
-            # Tiny ImageNet requires a validation data preprocessing step
-            # Create train-like structure for val data for ImageFolder
-            val_dir = f'{dir_path}/rawdata/tiny-imagenet-200/val/'
-            with open(os.path.join(val_dir, 'val_annotations.txt'), 'r') as f:
+            download_file('http://cs231n.stanford.edu/tiny-imagenet-200.zip', zip_file_path)
+        except Exception as e:
+            print(f"Error downloading file: {e}")
+            print("Please download tiny-imagenet-200.zip manually from http://cs231n.stanford.edu/tiny-imagenet-200.zip")
+            print(f"and place it in {rawdata_path}")
+            return
+    
+    # Extract the zip file if not already extracted
+    extract_path = os.path.join(rawdata_path, 'tiny-imagenet-200')
+    if not os.path.exists(extract_path):
+        print("Extracting Tiny-ImageNet...")
+        with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+            zip_ref.extractall(rawdata_path)
+
+    # Tiny ImageNet requires a validation data preprocessing step
+    # Create train-like structure for val data for ImageFolder
+    val_dir = os.path.join(extract_path, 'val')
+    val_images_dir = os.path.join(val_dir, 'images')
+    val_annotations_file = os.path.join(val_dir, 'val_annotations.txt')
+
+    # Only process validation data if it's in the original structure
+    if os.path.exists(val_images_dir) and os.path.exists(val_annotations_file):
+        print("Processing validation data...")
+        try:
+            with open(val_annotations_file, 'r') as f:
                 for line in f.readlines():
                     parts = line.strip().split('\t')
                     img_name, class_id = parts[0], parts[1]
                     class_dir = os.path.join(val_dir, class_id)
                     os.makedirs(class_dir, exist_ok=True)
-                    os.rename(os.path.join(val_dir, 'images', img_name), os.path.join(class_dir, img_name))
-            os.rmdir(os.path.join(val_dir, 'images')) # Remove empty images folder
-        except subprocess.CalledProcessError as e:
-            print(f"Error during TinyImageNet download or unzip: {e}")
-            sys.exit(1) # Exit if download/unzip fails
+                    
+                    # Check if the image is still in the original location
+                    src_path = os.path.join(val_images_dir, img_name)
+                    dst_path = os.path.join(class_dir, img_name)
+                    
+                    if os.path.exists(src_path):
+                        os.rename(src_path, dst_path)
+            
+            # Only try to remove the images directory if it exists and is empty
+            if os.path.exists(val_images_dir) and not os.listdir(val_images_dir):
+                os.rmdir(val_images_dir)
+                print("Validation data processing completed.")
+            
+        except Exception as e:
+            print(f"Error processing validation data: {e}")
+            print("This might not be an issue if the data was already processed.")
     else:
-        print('rawdata already exists.\n')
+        print("Validation data appears to be already processed.")
 
-    transform = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    # Set up transforms with resize for TinyImageNet's 64x64 images
+    transform = transforms.Compose([
+        transforms.Resize((64, 64)),  # Ensure consistent size
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
 
-    # TinyImageNet has train and val folders
-    trainset = ImageFolder_custom(root=dir_path+'rawdata/tiny-imagenet-200/train/', transform=transform)
-    # The original MOON code uses ImageFolder for train and a custom DatasetFolder for val/test if dataidxs are passed.
-    # For initial data generation, we combine train and val as the full dataset.
-    valset = ImageFolder_custom(root=dir_path+'rawdata/tiny-imagenet-200/val/', transform=transform) # Use val as test data source
+    # Load datasets with error handling
+    try:
+        trainset = ImageFolder_custom(root=os.path.join(extract_path, 'train'), transform=transform)
+        valset = ImageFolder_custom(root=os.path.join(extract_path, 'val'), transform=transform)
+    except Exception as e:
+        print(f"Error loading datasets: {e}")
+        return
     
-    # TinyImageNet needs custom handling to get data and targets from ImageFolder
-    # It stores data as samples = [(path, class_idx), ...]
-    # We need to load images and convert to numpy array and targets to numpy array
+    print(f"Loaded {len(trainset.samples)} training samples and {len(valset.samples)} validation samples")
     
     dataset_image = []
     dataset_label = []
 
-    # Process trainset
-    for img_path, label in trainset.samples:
-        img = Image.open(img_path).convert('RGB')
-        dataset_image.append(np.array(img))
-        dataset_label.append(label)
+    # Process datasets with progress bars and error handling
+    print("Processing training data...")
+    for img_path, label in tqdm(trainset.samples, desc="Training data"):
+        try:
+            img = Image.open(img_path).convert('RGB')
+            img = img.resize((64, 64))  # Ensure consistent size
+            dataset_image.append(np.array(img))
+            dataset_label.append(label)
+        except Exception as e:
+            print(f"Error processing image {img_path}: {e}")
+            continue
     
-    # Process valset (treating as part of overall data for partitioning)
-    for img_path, label in valset.samples:
-        img = Image.open(img_path).convert('RGB')
-        dataset_image.append(np.array(img))
-        dataset_label.append(label)
+    print("Processing validation data...")
+    for img_path, label in tqdm(valset.samples, desc="Validation data"):
+        try:
+            img = Image.open(img_path).convert('RGB')
+            img = img.resize((64, 64))  # Ensure consistent size
+            dataset_image.append(np.array(img))
+            dataset_label.append(label)
+        except Exception as e:
+            print(f"Error processing image {img_path}: {e}")
+            continue
+
+    if not dataset_image:
+        print("Error: No images were successfully processed")
+        return
 
     dataset_image = np.array(dataset_image)
     dataset_label = np.array(dataset_label)
 
-
     num_classes = len(set(dataset_label))
     print(f'Number of classes: {num_classes}')
+    print(f'Total number of images: {len(dataset_image)}')
 
     # Call separate_data with new parameters and retrieve new return values
     # For TinyImageNet, class_per_client=20 might be suitable for Non-IID

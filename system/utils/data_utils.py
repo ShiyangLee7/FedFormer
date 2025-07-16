@@ -81,8 +81,7 @@ def read_client_task_data(dataset, client_id, task_id, is_train=True):
             data_path = os.path.join(get_project_root(), 'dataset', dataset, 'train', 'task_data', f'client_{client_id}_task_{task_id}.npz')
         else:
             # For testing, we might want to use the regular test data filtered by task classes
-            # But for now, we'll use the same task_data directory
-            data_path = os.path.join(get_project_root(), 'dataset', dataset, 'train', 'task_data', f'client_{client_id}_task_{task_id}.npz')
+            data_path = os.path.join(get_project_root(), 'dataset', dataset, 'test', 'task_data', f'client_{client_id}_task_{task_id}.npz')
 
         # Add absolute path debugging
         abs_path = os.path.abspath(data_path)

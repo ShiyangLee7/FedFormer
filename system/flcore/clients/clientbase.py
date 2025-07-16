@@ -34,8 +34,6 @@ class Client(object):
         self.few_shot = args.few_shot
 
         # New: Task-related attributes
-        # Ensure config is read safely. This is called *per client*, could be optimized if config is truly global
-        # but for now, keep it as is based on existing pattern.
         config = read_config(self.dataset) 
         self.task_type = config.get('task_type', 'iid_tasks')
         self.num_tasks = config.get('num_tasks', 1)
@@ -284,8 +282,6 @@ class Client(object):
 
         return losses, train_num
     
-    # The following methods are for saving/loading client-specific items.
-    # No changes needed here for task management.
     def save_item(self, item, item_name, item_path=None):
         if item_path == None:
             item_path = self.save_folder_name

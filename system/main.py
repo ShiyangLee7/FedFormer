@@ -8,13 +8,12 @@ import warnings
 import numpy as np
 import torchvision
 import logging
-import torch.nn as nn # Added for ResNet18 model modification
 
 from flcore.servers.serveravg import FedAvg
 # from flcore.servers.serverpFedMe import pFedMe
-# (Keep all other server imports commented out as in original)
+# (other server imports)
 
-from flcore.trainmodel.models import * # Assuming your models are here
+from flcore.trainmodel.models import * 
 from flcore.trainmodel.bilstm import *
 from flcore.trainmodel.resnet import *
 from flcore.trainmodel.alexnet import *
@@ -89,16 +88,8 @@ def run(args):
                 args.model = DNN(60, 20, num_classes=args.num_classes).to(args.device)
         
         elif model_str == "ResNet18":
-            print("\nInitializing ResNet18 model...")
-            # Initialize ResNet18 with the correct number of classes
-            model = torchvision.models.resnet18(pretrained=False)
-            # Modify the final fully connected layer for our number of classes
-            model.fc = nn.Linear(model.fc.in_features, args.num_classes)
-            args.model = model.to(args.device)
-            print("ResNet18 architecture:")
-            print(args.model)
-            print(f"Number of classes: {args.num_classes}")
-            
+            args.model = torchvision.models.resnet18(pretrained=False, num_classes=args.num_classes).to(args.device)
+        
         elif model_str == "ResNet10":
             args.model = resnet10(num_classes=args.num_classes).to(args.device)
         
@@ -152,9 +143,24 @@ def run(args):
         print(args.model)
 
         if args.algorithm == "FedAvg":
-            server = FedAvg(args, i)
+            
+            # Save the original fc layer
+            args.head = copy.deepcopy(args.model.fc)
+            
+            # Replace fc with Identity
+            args.model.fc = nn.Identity()
+            
+            # Create base model (without fc) and head (fc only)
+            base_model = args.model
+            head_model = args.head
+            
+            # Create the split model
+            args.model = BaseHeadSplit(base_model, head_model)
 
-        # (All other algorithms commented out as in original)
+            # Initialize server
+            server = FedAvg(args, i) # args now contains new task/dynamic client info
+
+        # other algorithms
         # elif args.algorithm == "Local":
         #     server = Local(args, i)
         # ...

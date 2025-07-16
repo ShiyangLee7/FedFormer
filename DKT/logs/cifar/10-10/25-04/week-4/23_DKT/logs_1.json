@@ -1,0 +1,1 @@
+{"task": 0, "epoch": 499, "acc": 94.6, "avg_acc": 94.6, "forgetting": 0.0, "acc_per_task": [94.6], "train_lr": 1.0039083119111025e-05, "bwt": 0.0, "fwt": 0.0, "test_acc1": 94.6, "test_acc5": 99.7, "mean_acc5": 99.7, "train_loss": 0.02429, "test_loss": 0.36123, "token_mean_dist": 0.0, "token_min_dist": 0.0, "token_max_dist": 0.0}

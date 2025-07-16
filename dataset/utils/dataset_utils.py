@@ -188,9 +188,8 @@ def separate_data(data, num_clients, num_classes, niid=False, balance=False, par
             dataidx_map[j] = idx_batch[j]
         print(f"Generating Non-IID data distribution with OVERLAP via Dirichlet (partition: {partition}, alpha: {alpha}).")
 
-    elif partition == 'exdir': # I.2: Non-IID with overlap via ExDir (from PFLlib, already exists)
-        # Your existing 'exdir' logic is already for Non-IID with overlap
-        # I've kept it as is assuming it's tested and functional for I.2
+    elif partition == 'exdir': # I.2: Non-IID with overlap via ExDir
+        # for Non-IID with overlap I.2
         r'''This strategy comes from https://arxiv.org/abs/2311.03154
         See details in https://github.com/TsingZ0/PFLlib/issues/139
 
@@ -440,9 +439,6 @@ def split_data(X, y):
             else: # No data left after filtering
                 X_train_filtered, X_test_filtered, y_train_filtered, y_test_filtered = np.array([]), np.array([]), np.array([]), np.array([])
 
-            # Combine back the single-sample data if you wish, or append to one split.
-            # For simplicity, let's just append the single-sample data to training set (or randomly to train/test).
-            # This ensures they are not lost.
             X_train_single = X[i][~mask]
             y_train_single = y[i][~mask]
 
